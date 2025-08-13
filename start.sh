@@ -1,39 +1,20 @@
 #!/bin/bash
+# PIRATENABENTEUER – erweiterte Version (bunter, größer, witziger, mit Rätseln & Jobs)
+# Läuft im Terminal: bash piratenabenteuer.sh
 
-# Pirate Adventure – a simple text‑based point‑and‑click style game for the terminal
-#
-# This script uses ANSI escape sequences for colour and simple ASCII art to
-# illustrate scenes. The player takes the role of a wannabe pirate who explores
-# a small harbour town in search of a ship. Throughout the adventure the
-# player can visit locations such as a tavern, the market and the docks,
-# interact with characters, collect items and make choices that branch the
-# story. Eventually, when the necessary objectives have been achieved, the
-# player will set sail, and the game ends with a "to be continued" message.
-#
-# To play the game, run this script in a Unix/Linux terminal: bash pirate_adventure.sh
-# Ensure the terminal supports colours; if not, the game will still work but
-# colours will not display as intended.
-
-# Check for Bash version 4 or later to ensure associative arrays work
+# --- Runtime-Basics -----------------------------------------------------------
 if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-  echo "Dieses Abenteuer benötigt mindestens Bash 4. Bitte aktualisiere deine Bash-Version."
+  echo "Dieses Abenteuer benötigt mindestens Bash 4. Bitte aktualisiere deine Bash-Version."
   exit 1
 fi
 
-# Set up some ANSI colour codes using tput. The TERM environment variable must
-# be defined for tput to work; otherwise tput will complain. If TERM is not
-# set, we default to "xterm". Should tput be unavailable or fail, we fall
-# back to empty strings so the script still runs without colours.
-if [ -z "$TERM" ]; then
-  # Default to xterm if TERM is undefined. Exporting ensures that child
-  # processes like clear and tput see the value.
-  export TERM=xterm
-fi
+# Farben (tput, fallback ohne Farben)
+if [ -z "$TERM" ]; then export TERM=xterm; fi
 if command -v tput >/dev/null 2>&1; then
-  # Try to assign colours; suppress potential error messages by redirecting
-  # stderr to /dev/null. If tput fails (e.g. unsupported terminal), variables
-  # remain empty.
   bold=$(tput bold 2>/dev/null || true)
+  dim=$(tput dim 2>/dev/null || true)
+  reset=$(tput sgr0 2>/dev/null || true)
+  black=$(tput setaf 0 2>/dev/null || true)
   red=$(tput setaf 1 2>/dev/null || true)
   green=$(tput setaf 2 2>/dev/null || true)
   yellow=$(tput setaf 3 2>/dev/null || true)
@@ -41,381 +22,565 @@ if command -v tput >/dev/null 2>&1; then
   magenta=$(tput setaf 5 2>/dev/null || true)
   cyan=$(tput setaf 6 2>/dev/null || true)
   white=$(tput setaf 7 2>/dev/null || true)
-  reset=$(tput sgr0 2>/dev/null || true)
 else
-  bold=""; red=""; green=""; yellow=""; blue=""; magenta=""; cyan=""; white=""; reset=""
+  bold=""; dim=""; reset=""
+  black=""; red=""; green=""; yellow=""; blue=""; magenta=""; cyan=""; white=""
 fi
 
-# Global state variables. These track whether the player has acquired certain
-# items or completed particular tasks. The game uses them to enable or
-# restrict actions.
-declare -A inventory
+# Mindest-Terminalgröße (für große ASCII-Bilder)
+min_cols=90
+min_lines=28
+get_cols() { command -v tput >/dev/null 2>&1 && tput cols || echo 80; }
+get_lines(){ command -v tput >/dev/null 2>&1 && tput lines || echo 24; }
+check_terminal() {
+  local c=$(get_cols) l=$(get_lines)
+  if (( c < min_cols || l < min_lines )); then
+    echo -e "${yellow}${bold}Hinweis:${reset} Dieses Spiel sieht am besten ab ${min_cols}x${min_lines} Zeichen aus."
+    echo -e "Aktuell: ${c}x${l}. Bitte vergrößere das Terminal (z.B. Vollbild) und starte erneut."
+    read -rp "Trotzdem spielen? (j/N) " ans
+    [[ "$ans" =~ ^[JjYy]$ ]] || exit 0
+  fi
+}
+
+# --- Spielzustand -------------------------------------------------------------
+declare -A inventory   # Items: ["Karte"]=true, ["Apfel"]=true, ...
+declare -A crew        # Crew:  ["Schiffsjunge"]=true, ["Navigator"]=true ...
+gold=15                # Startkapital, klein aber fein
 has_ship=false
-has_map=false
-gold=0
+has_map=false          # bleibt für Logik zusätzlich zu inventory["Karte"]
+savefile="${HOME}/.piratenabenteuer.save"
 
-# Helper function to pause until the user presses Enter.
-press_enter() {
-  echo
-  read -rp "Drücke [Enter], um fortzufahren... "
-}
+# --- Helpers ------------------------------------------------------------------
+press_enter(){ echo; read -rp "Drücke [Enter], um fortzufahren... "; }
+say(){ echo -e "$*${reset}"; }
+money(){ echo -e "${yellow}${bold}Gold:${reset} ${yellow}${gold}${reset}"; }
+have(){ [[ -n "${inventory[$1]+x}" ]]; }     # have "Item"
+in_crew(){ [[ -n "${crew[$1]+x}" ]]; }       # in_crew "Rolle"
 
-# ASCII art definitions. These are displayed at various points in the game.
-ascii_pirate() {
-  # A simple pirate portrait using ASCII art. This illustration gives the
-  # impression of a pirate with a bandana and eyepatch.
-  cat <<'EOF'
-         _~_
-        (o.o)
-         |)|
-        _| |_
-      _/     \_
-EOF
-}
-
-ascii_tavern() {
-  # An interior view of a rustic tavern. The mugs and bottles on the
-  # bar hint at a busy establishment.
-  cat <<'EOF'
-        .-"""-.
-       /       \
-      /  .-""-. \
-     |  /      \ |
-     | |  .--.  | |
-     | | (    ) | |
-     |  \ '--' /  |
-      \  '-..-'  /
-       '-.____.-'
-        /  ||  \
-       |   ||   |
-       |   ||   |
-       |   ||   |
-        \  ||  /
-         '--'--'
-EOF
-}
-
-ascii_market() {
-  # A simple market stall with an awning. Fruits and goods are hinted by
-  # different characters.
-  cat <<'EOF'
-      _______
-     /\_____/\
-    / /     \ \
-   ( (       ) )
-    \ \_____/ /
-     \_______/
-     /       \
-    /  o   o  \
-   /    o      \
-  / o       o   \
-EOF
-}
-
-ascii_harbour() {
-  # A small boat moored at a dock. The waves below simulate the sea.
-  cat <<'EOF'
-            |\
-           /| \    
-          /_|__\
-       ___/_____\____
-      /             /|
-     /    O   O    / |
-    /_____________/  |
-    |             |  |
-    |             |  |
-    |             |  |
-    |_____________| /
-     \_____________/
-      ~~~    ~~~
-EOF
-}
-
-ascii_ship() {
-  # A larger sailing ship used when the player finally obtains their own ship.
-  cat <<'EOF'
-                 |    |    |
-                )_)  )_)  )_)
-               )___))___))___)\
-              )____)____)_____)\\
-            _____|____|____|____\\\__
-    -------\                   /-----
-             \_________________/
-EOF
-}
-
-# Function: display_header
-# Prints the game title and initial banner with colours and ASCII art.
-display_header() {
-  clear
-  echo -e "${bold}${cyan}Willkommen bei PIRATENABENTEUER!${reset}"
-  echo -e "${yellow}Du bist ein junger Abenteurer, der davon träumt, ein großer Pirat zu werden – so legendär wie Guybrush Threepwood.${reset}"
-  echo
-  ascii_pirate | while read -r line; do echo -e "${magenta}${line}${reset}"; done
-  echo
-  echo -e "${blue}Du befindest dich in einer kleinen Hafenstadt auf einer tropischen Insel. Es riecht nach Rum, Salz und Abenteuer...${reset}"
-  echo
-}
-
-# Function: choose
-# Generic helper to present a list of choices and return the selected option.
-# Arguments: a list of strings (each option) and sets $choice to the selection.
-choose() {
+choose(){ # choose "Prompt" "Opt1" "Opt2" ...
   local prompt="$1"; shift
-  local options=()
-  local i=1
-  for opt in "$@"; do
-    options+=("$opt")
-  done
-  echo -e "$prompt"
-  for idx in "${!options[@]}"; do
-    printf "  %s) %s\n" "$((idx+1))" "${options[$idx]}"
-  done
+  local options=("$@")
+  echo -e "${cyan}${prompt}${reset}"
+  local i
+  for i in "${!options[@]}"; do printf "  %2d) %s\n" "$((i+1))" "${options[$i]}"; done
   local sel
   while true; do
     read -rp "Deine Wahl: " sel
-    if [[ "$sel" =~ ^[0-9]+$ && $sel -ge 1 && $sel -le ${#options[@]} ]]; then
-      choice=${options[$((sel-1))]}
-      break
-    else
-      echo "Ungültige Eingabe. Bitte gib eine Zahl zwischen 1 und ${#options[@]} ein."
+    if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel>=1 && sel<=${#options[@]} )); then
+      choice="${options[$((sel-1))]}"
+      return 0
     fi
+    say "${red}Ungültige Eingabe.${reset}"
   done
 }
 
-# Function: tavern_scene
-# Handles the interactions within the tavern. The player can talk to patrons,
-# gamble for gold or buy a map if they have enough gold. The tavern sets up
-# story elements and possibilities for acquiring a map.
-tavern_scene() {
+# --- ASCII-Kunst --------------------------------------------------------------
+banner(){
+  cat <<'EOF'
+ __    __  .__   __.  _______   ______   .___________. _______  _______   ______  __    __
+|  |  |  | |  \ |  | |       \ /  __  \  |           ||   ____||   ____| /      ||  |  |  |
+|  |__|  | |   \|  | |  .--.  |  |  |  | `---|  |----`|  |__   |  |__   |  ,----'|  |__|  |
+|   __   | |  . `  | |  |  |  |  |  |  |     |  |     |   __|  |   __|  |  |     |   __   |
+|  |  |  | |  |\   | |  '--'  |  `--'  '     |  |     |  |____ |  |____ |  `----.|  |  |  |
+|__|  |__| |__| \__| |_______/ \______/      |__|     |_______||_______| \______||__|  |__|
+EOF
+}
+
+ascii_street(){
+  cat <<'EOF'
+              ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
+         ~  ~        .-^^-._        _.-^^-.         ~   ~
+            _     .-^  _   _^-.  .-^_   _  ^-.   _
+           / \  .^   .´ `-´ `.  V  .´`-´ `.   ^. / \
+          / | \/  .-´  TAVERNE `-^-´  MARKT  `-. \/ | \
+         /  | /  /   _    |   _   _    |    _   \ \ |  \
+        /   |/  |   (_)   |  (_) (_)   |   (_)   | \|   \
+====/====/====/====/====/====/====/====/====/====/====/======
+      |         HAFEN ->           ~  ~  ~  ~
+      |___________________________ Holzplanken ~  ~
+EOF
+}
+
+ascii_tavern_big(){
+  cat <<'EOF'
+        .-~~~~~~~~~~~~~~~~~~~~~~~~~~~~-.
+       /   _   _    ____    _   _       \
+      /   | | | |  / __ \  | \ | |       \
+     |    | |_| | | |  | | |  \| |        |
+     |    |  _  | | |  | | | . ` |  ____  |
+     |    | | | | | |__| | | |\  | |____| |
+      \   |_| |_|  \____/  |_| \_|        /
+       \_________________________________/
+          |  _   _  |  |  _   _  |  |   |
+          | | | | | |  | | | | | |  |   |
+          | | |_| | |  | | |_| | |  |   |
+          | |  _  | |  | |  _  | |  |   |
+          | | | | | |  | | | | | |  |   |
+          |_|_| |_|_|  |_|_| |_|_|  |___|
+         /  __   __  \  /   __   \   | |
+        /  (  ) (  )  \/   (  )   \  | |
+       /___||____||____\___||______\_|_|
+          Krüge • Rum • Gekicher • Lieder
+EOF
+}
+
+ascii_market_big(){
+  cat <<'EOF'
+            ________________________________
+           /  FRISCHER FISCH  •  OBST  •  SEILE \
+          /_____________________________________\
+          |  o   o    o    o    o    o    o     |
+          |    o    o    o    o    o    o       |
+          | o    o   o   o   o   o    o    o    |
+          |_____________________________________|
+            \__\__\__\__\__\__\__\__\__\__\__/
+                 |      |      |      |
+                 |      |      |      |
+              Händler  Äpfel  Krimskrams
+EOF
+}
+
+ascii_docks_big(){
+  cat <<'EOF'
+                           |\
+                           | \      Möwen: "Kreee!"
+                     ______|__\____________________
+                    /   Holzsteg  |               /|
+                   /              |   KLEINER    / |
+                  /     WASSER    |    KAHN     /  |
+                 /________________|____________/   |
+                 |                                |
+                 |    Fässer • Taue • Matrosen    |
+                 |________________________________|
+                ~~~    ~~~      ~~~     ~~~    ~~~~
+EOF
+}
+
+ascii_lighthouse(){
+  cat <<'EOF'
+                 /\ 
+                /  \
+               / /\ \
+              / /  \ \
+             /_/____\_\
+               |    |
+               | [] |
+               |____|      ~  ~      Sterne funkeln
+            ___/____\___
+           /            \
+          /   LEUCHT-    \
+         /     TURM       \
+         -------------------
+EOF
+}
+
+ascii_blacksmith(){
+  cat <<'EOF'
+      (__)   SCHMIEDE
+   ___(  ))__________________
+  /  /|  /  Hammer  Funken  /|
+ /__/ |_/___________________/ |
+ |  __      __      __      | |
+ | |__|    |__|    |__|     | |
+ |  ||      ||      ||      | |
+ |__||______||______||______|/
+   (glühendes Eisen)   (Kohle)
+EOF
+}
+
+ascii_casino(){
+  cat <<'EOF'
+     .------.------.------.      Einsatz! Würfel rollen!
+     |  6   |  6   |  6   |      (Kein Einsatz -> kein Spiel)
+     '------'------'------'
+     .------.------.------.
+     |  3   |  4   |  5   |
+     '------'------'------'
+EOF
+}
+
+ascii_ship_big(){
+  cat <<'EOF'
+                 |    |    |
+                )_)  )_)  )_)
+               )___))___))___)\ 
+              )____)____)_____)\\
+            _____|____|____|____\\\__
+    -------\         KAPITÄN         /-----
+             \_______________________/
+             ~ ~ ~   Wellen   ~ ~ ~ ~
+EOF
+}
+
+# Druck-Helfer für farbige Bilder
+paint(){ local color="$1"; shift; while IFS= read -r line; do echo -e "${color}${line}${reset}"; done <<<"$*"; }
+
+# --- Speichern/Laden ----------------------------------------------------------
+save_game(){
+  cat > "$savefile" <<EOF
+gold=$gold
+has_ship=$has_ship
+has_map=$has_map
+inventory_keys=$(printf "%s " "${!inventory[@]}")
+crew_keys=$(printf "%s " "${!crew[@]}")
+EOF
+  say "${green}Spielstand gespeichert nach:${reset} ${savefile}"
+}
+load_game(){
+  if [[ -f "$savefile" ]]; then
+    # shellcheck disable=SC1090
+    source "$savefile"
+    # Rekonstruiere Booleans & Maps
+    declare -gA inventory
+    declare -gA crew
+    for k in $inventory_keys; do inventory["$k"]=true; done
+    for k in $crew_keys; do crew["$k"]=true; done
+    say "${green}Spielstand geladen.${reset}"
+  else
+    say "${red}Kein Spielstand gefunden (${savefile}).${reset}"
+  fi
+  press_enter
+}
+
+# --- Szenen & Logik -----------------------------------------------------------
+display_header(){
   clear
-  echo -e "${yellow}Du betrittst die Taverne. Das Gemurmel von Stimmen, das Klirren von Krügen und eine leise Musik erfüllen den Raum.${reset}"
-  # Display the tavern with a warm yellow/brown tone. Since there is no explicit
-  # brown colour in many terminals, we reuse yellow as a substitute.
-  ascii_tavern | while read -r line; do echo -e "${yellow}${line}${reset}"; done
+  paint "$cyan" "$(banner)"
   echo
-  local leave=false
-  while [ "$leave" = false ]; do
-    echo -e "${cyan}Was möchtest du tun?${reset}"
-    # Define available actions depending on the player's current state
-    local actions=("Mit dem Wirt sprechen" "Mit einem Piraten würfeln" "Zurück zur Straße")
-    if ! $has_map; then
-      actions+=("Nach einer Karte fragen")
+  paint "$magenta" "$(ascii_street)"
+  echo -e "${yellow}Du träumst davon, so legendär zu werden wie ${bold}Guybrush Threepwood${reset}${yellow}.*${reset}"
+  echo -e "${dim}* Völlig zufällige Ähnlichkeit mit berühmten Piraten ist selbstverständlich Zufall.${reset}"
+  echo
+}
+
+status_screen(){
+  clear
+  say "${bold}${cyan}STATUS${reset}"
+  money
+  echo -e "${yellow}Inventar:${reset}"
+  if ((${#inventory[@]}==0)); then echo "  (leer)"; else for k in "${!inventory[@]}"; do echo "  - $k"; done; fi
+  echo -e "${yellow}Crew:${reset}"
+  if ((${#crew[@]}==0)); then echo "  (keine)"; else for k in "${!crew[@]}"; do echo "  - $k"; done; fi
+  echo -e "${yellow}Schiff:${reset} $([[ $has_ship == true ]] && echo 'Ja' || echo 'Nein')"
+  echo -e "${yellow}Karte:${reset} $([[ $has_map == true ]] && echo 'Ja' || echo 'Nein')"
+  echo
+  choose "Aktion:" "Zurück" "Spiel speichern" "Spiel laden"
+  case "$choice" in
+    "Spiel speichern") save_game; press_enter;;
+    "Spiel laden") load_game;;
+  esac
+}
+
+# --- Taverne: Glücksspiel, Karte, Koch anheuern (Rätsel) ----------------------
+dice_game(){
+  clear
+  paint "$yellow" "$(ascii_casino)"
+  say "${bold}Piraten-Pasch${reset}: Du & der Pirat würfeln je 3 Würfel. Höhere Summe gewinnt den Einsatz."
+  while true; do
+    money
+    read -rp "Einsatz (1..50, 0=zurück): " bet
+    [[ ! "$bet" =~ ^[0-9]+$ ]] && { say "${red}Zahl, bitte.${reset}"; continue; }
+    (( bet==0 )) && return
+    if (( bet<1 || bet>50 )); then say "${red}Zwischen 1 und 50, bitte.${reset}"; continue; fi
+    if (( gold<bet )); then say "${red}Du hast nicht genug Gold für diesen Einsatz.${reset}"; continue; fi
+    # würfeln
+    p1=$((1+RANDOM%6)); p2=$((1+RANDOM%6)); p3=$((1+RANDOM%6)); ps=$((p1+p2+p3))
+    o1=$((1+RANDOM%6)); o2=$((1+RANDOM%6)); o3=$((1+RANDOM%6)); os=$((o1+o2+o3))
+    echo -e "Du würfelst: ${green}${p1}-${p2}-${p3} (Summe ${ps})${reset}"
+    echo -e "Gegner würfelt: ${red}${o1}-${o2}-${o3} (Summe ${os})${reset}"
+    if (( ps>os )); then
+      gold=$((gold+bet))
+      say "${green}Gewonnen! +${bet} Gold.${reset}"
+    elif (( ps<os )); then
+      gold=$((gold-bet))
+      say "${red}Verloren! -${bet} Gold.${reset}"
+    else
+      say "${yellow}Unentschieden. Kein Gewinn, kein Verlust.${reset}"
     fi
-    choose "" "${actions[@]}"
+    (( gold<1 )) && { say "${red}Du bist pleite. Vielleicht Teller spülen?${reset}"; press_enter; return; }
+    choose "Nochmal?" "Ja" "Nein"
+    [[ "$choice" == "Nein" ]] && return
+  done
+}
+
+tavern_cook_riddle(){
+  # Koch will nur mit, wenn du ein absurd-kulinarisches Rätsel packst
+  say "${magenta}Der Koch brummt:${reset} 'Ich schließe mich nur einem Genie an. Wähle die drei Zutaten, die NICHT explodieren.'"
+  say "Optionen: Wasser, Zwiebel, Salz, Rum, Chili, Banane"
+  choose "Wähle eine Kombination:" \
+    "Wasser + Zwiebel + Salz" \
+    "Rum + Chili + Banane" \
+    "Wasser + Banane + Rum"
+  case "$choice" in
+    "Wasser + Zwiebel + Salz")
+      crew["Koch"]=true
+      say "${green}Der Koch nickt beeindruckt: 'Endlich jemand mit Geschmacksknospen!' (Koch tritt bei)${reset}"
+      ;;
+    "Rum + Chili + Banane"|"Wasser + Banane + Rum")
+      say "${red}BOOOOM! (Zum Glück nur in der Fantasie – aber der Koch schaut sehr enttäuscht.)${reset}"
+      say "${yellow}Tipp:${reset} Alkohol & Banane sind fürs Dessert – nicht für die Suppe."
+      ;;
+  esac
+  press_enter
+}
+
+tavern_scene(){
+  clear
+  paint "$yellow" "$(ascii_tavern_big)"
+  say "${cyan}Die Taverne bebt. Lachen, Rumgeruch, jemand spielt auf einer verstimmten Laute.${reset}"
+  while true; do
+    local acts=("Mit dem Wirt sprechen" "Piraten-Pasch spielen" "Karte kaufen (30 Gold)" "Mit dem Koch sprechen" "Zurück zur Straße")
+    choose "Was tun?" "${acts[@]}"
     case "$choice" in
       "Mit dem Wirt sprechen")
-        echo -e "${magenta}Du bestellst einen Krug Rum und plauderst mit dem Wirt. Er erzählt dir von einem legendären Schatz, der irgendwo in diesen Gewässern versteckt sein soll.${reset}"
+        say "${magenta}Wirt:${reset} 'Legendäre Schätze! Legendäre Rechnungen! Was darf's sein?'"
         press_enter
         ;;
-      "Mit einem Piraten würfeln")
-        echo -e "${magenta}Du setzt dich an einen Tisch, an dem ein zahnloser Pirat Würfel in der Hand hält.${reset}"
-        echo -e "${magenta}Ihr spielt eine Runde um 10 Goldstücke.${reset}"
-        # Simulate a simple dice game: random win/loss
-        local roll=$((RANDOM % 2))
-        if [[ $roll -eq 0 ]]; then
-          echo -e "${red}Du verlierst! Der Pirat lacht dreckig und streicht deine 10 Goldstücke ein.${reset}"
-          ((gold=gold-10))
-          if [ $gold -lt 0 ]; then gold=0; fi
-        else
-          echo -e "${green}Du gewinnst! Der Pirat knurrt, aber überreicht dir 20 Goldstücke.${reset}"
-          ((gold=gold+20))
-        fi
-        echo -e "${yellow}Du hast jetzt $gold Goldstücke.${reset}"
-        press_enter
+      "Piraten-Pasch spielen")
+        dice_game
         ;;
-      "Nach einer Karte fragen")
+      "Karte kaufen (30 Gold)")
         if $has_map; then
-          echo -e "${magenta}Du besitzt bereits eine Karte.${reset}"
-        elif [ $gold -lt 30 ]; then
-          echo -e "${red}Der Wirt schüttelt den Kopf. 'Ich verkaufe dir eine alte Schatzkarte für 30 Goldstücke. Du hast nicht genug Gold.'${reset}"
+          say "${yellow}Du besitzt bereits eine Karte.${reset}"
+        elif (( gold<30 )); then
+          say "${red}Nicht genug Gold. Vielleicht unten am Hafen jobben?${reset}"
         else
-          echo -e "${green}Der Wirt lächelt verschwörerisch und legt eine vergilbte Karte auf den Tisch.${reset}"
-          echo -e "${green}'Für 30 Goldstücke gehört sie dir', sagt er.${reset}"
-          choose "Möchtest du die Karte kaufen?" "Ja" "Nein"
-          if [[ "$choice" = "Ja" ]]; then
-            ((gold=gold-30))
-            has_map=true
-            inventory["Karte"]=true
-            echo -e "${yellow}Du hast eine Schatzkarte erworben!${reset}"
-            echo -e "${yellow}Verbleibendes Gold: $gold${reset}"
-          else
-            echo -e "${magenta}Du entscheidest, das Angebot abzulehnen.${reset}"
+          choose "Für 30 Gold kaufen?" "Ja" "Nein"
+          if [[ "$choice" == "Ja" ]]; then
+            gold=$((gold-30)); has_map=true; inventory["Karte"]=true
+            say "${green}Du erwirbst eine knitterige Schatzkarte. Hoffentlich ist sie nicht von Kindern gemalt.${reset}"
           fi
         fi
         press_enter
         ;;
+      "Mit dem Koch sprechen")
+        if in_crew "Koch"; then
+          say "${yellow}Der Koch ist bereits in deiner Crew. Er würzt gerade den Rum mit Pfeffer (frag nicht).${reset}"
+          press_enter
+        else
+          tavern_cook_riddle
+        fi
+        ;;
       "Zurück zur Straße")
-        leave=true
+        return
         ;;
     esac
   done
 }
 
-# Function: market_scene
-# Handles the market. Here the player can buy supplies or pick up a crew member.
-market_scene() {
+# --- Markt: Apfel, Schiffsjunge (Apfel-Trick), Kleinkram, Job -----------------
+market_scene(){
   clear
-  echo -e "${yellow}Du spazierst über den geschäftigen Markt. Händler preisen lautstark ihre Waren an – Fische, exotische Früchte und Seile stapeln sich an ihren Ständen.${reset}"
-  ascii_market | while read -r line; do echo -e "${green}${line}${reset}"; done
-  echo
-  local leave=false
-  while [ "$leave" = false ]; do
-    echo -e "${cyan}Was möchtest du tun?${reset}"
-    local actions=("Einen Apfel kaufen (5 Gold)" "Mit einem Schiffsjungen sprechen" "Zurück zur Straße")
-    choose "" "${actions[@]}"
+  paint "$green" "$(ascii_market_big)"
+  say "${cyan}Der Markt: laut, bunt, leicht klebrig unter den Sandalen.${reset}"
+  while true; do
+    local acts=("Apfel kaufen (5 Gold)" "Tau/Seil kaufen (7 Gold)" "Mit Schiffsjungen sprechen" "Kleiner Job: Waren ausrufen (+4 Gold)" "Zurück zur Straße")
+    choose "Was tun?" "${acts[@]}"
     case "$choice" in
-      "Einen Apfel kaufen (5 Gold)")
-        if [ $gold -lt 5 ]; then
-          echo -e "${red}Du hast nicht genug Gold, um einen Apfel zu kaufen.${reset}"
-        else
-          ((gold=gold-5))
-          echo -e "${green}Der Apfel ist saftig und erfrischend. Du fühlst dich gestärkt.${reset}"
-          echo -e "${yellow}Gold übrig: $gold${reset}"
-        fi
+      "Apfel kaufen (5 Gold)")
+        if (( gold<5 )); then say "${red}Dafür fehlt dir Gold.${reset}"; else gold=$((gold-5)); inventory["Apfel"]=true; say "${green}Du kaufst einen herrlich saftigen Apfel.${reset}"; fi
         press_enter
         ;;
-      "Mit einem Schiffsjungen sprechen")
-        echo -e "${magenta}Ein junger Schiffsjunge erzählt dir, dass er von einem großen Abenteuer träumt. Er bietet seine Hilfe an, wenn du einmal eine Crew brauchst.${reset}"
-        if [[ -z ${inventory["Schiffsjunge"]+x} ]]; then
-          choose "Möchtest du ihn anheuern?" "Ja" "Nein"
-          if [[ "$choice" = "Ja" ]]; then
-            inventory["Schiffsjunge"]=true
-            echo -e "${green}Der Schiffsjunge schließt sich dir an!${reset}"
-          else
-            echo -e "${magenta}Der Schiffsjunge zuckt mit den Schultern und kehrt zu seiner Arbeit zurück.${reset}"
-          fi
-        else
-          echo -e "${magenta}Der Schiffsjunge ist bereits Teil deiner Mannschaft.${reset}"
-        fi
+      "Tau/Seil kaufen (7 Gold)")
+        if (( gold<7 )); then say "${red}Zu wenig Gold.${reset}"; else gold=$((gold-7)); inventory["Seil"]=true; say "${green}Ein robustes Seil – kann man immer brauchen.${reset}"; fi
         press_enter
+        ;;
+      "Mit Schiffsjungen sprechen")
+        if in_crew "Schiffsjunge"; then
+          say "${yellow}Der Schiffsjunge ist schon an Bord – er übt gerade 'Seemannsknoten für Dummies'.${reset}"
+          press_enter
+        else
+          say "${magenta}Schiffsjunge:${reset} 'Ich komme mit, aber... äh... Aufnahmegebühr 30 Gold?'"
+          if have "Apfel"; then
+            say "${cyan}Du hältst langsam einen glänzenden Apfel in die Höhe.${reset}"
+            choose "Der Apfel...?" "Bestechung versuchen" "Lieber 30 Gold zahlen (wenn vorhanden)" "Doch nicht"
+            case "$choice" in
+              "Bestechung versuchen")
+                say "${green}Schiffsjunge:${reset} '…ist das ein ${bold}Apfel${reset}? Ich LIEBE Äpfel. Deal!'"
+                unset 'inventory["Apfel"]'
+                crew["Schiffsjunge"]=true
+                say "${green}Der Schiffsjunge tritt deiner Crew bei – bezahlt in Obst.${reset}"
+                ;;
+              "Lieber 30 Gold zahlen (wenn vorhanden)")
+                if (( gold>=30 )); then gold=$((gold-30)); crew["Schiffsjunge"]=true; say "${green}Er steckt die 30 Gold ein und springt auf.${reset}"; else say "${red}Du hast keine 30 Gold.${reset}"; fi
+                ;;
+              *)
+                say "${yellow}Der Junge schaut enttäuscht dem Apfel hinterher, der wieder in der Tasche verschwindet.${reset}"
+                ;;
+            esac
+          else
+            if (( gold>=30 )); then
+              choose "30 Gold für den Schiffsjungen zahlen?" "Ja" "Nein"
+              [[ "$choice" == "Ja" ]] && { gold=$((gold-30)); crew["Schiffsjunge"]=true; say "${green}Er ist jetzt an Bord (und leicht gierig).${reset}"; }
+            else
+              say "${red}Du hast keinen Apfel und zu wenig Gold. Vielleicht erst jobben?${reset}"
+            fi
+          fi
+          press_enter
+        fi
+        ;;
+      "Kleiner Job: Waren ausrufen (+4 Gold)")
+        say "${cyan}Du brüllst: 'FRISCHE FISCHE! FRISCHE… *hust*' – Ein paar Münzen klimpern in deine Hand.${reset}"
+        gold=$((gold+4)); money; press_enter
         ;;
       "Zurück zur Straße")
-        leave=true
+        return
         ;;
     esac
   done
 }
 
-# Function: harbour_scene
-# Handles the harbour/docks. The player can inspect ships, talk to a shipwright
-# and, if conditions are met (enough gold and map and crew), purchase a ship.
-harbour_scene() {
+# --- Hafen/Docks: Schiffsbauer, Jobs, Navigator (Leuchtturm) ------------------
+harbour_scene(){
   clear
-  echo -e "${yellow}Du schlenderst zum Hafen. Möwen kreischen über dir, und das Wasser schwappt sanft gegen die Holzpfähle.${reset}"
-  ascii_harbour | while read -r line; do echo -e "${cyan}${line}${reset}"; done
-  echo
-  local leave=false
-  while [ "$leave" = false ]; do
-    echo -e "${cyan}Was möchtest du tun?${reset}"
-    local actions=("Die Schiffe bestaunen" "Mit dem Schiffsbauer sprechen" "Zurück zur Straße")
-    choose "" "${actions[@]}"
+  paint "$cyan" "$(ascii_docks_big)"
+  say "${cyan}Der Hafen riecht nach Salz, Holz und leicht verbranntem Seemann.${reset}"
+  while true; do
+    local acts=("Die Schiffe bestaunen" "Mit dem Schiffsbauer sprechen" "Kleiner Job: Fässer schleppen (+6 Gold)" "Zum Leuchtturm (Navigator?)" "Zurück zur Straße")
+    choose "Was tun?" "${acts[@]}"
     case "$choice" in
       "Die Schiffe bestaunen")
-        echo -e "${magenta}Du siehst prächtige Schiffe mit hohen Masten und heruntergekommene Kähne. Ein Schiff in der Ferne trägt eine schwarze Flagge mit Totenkopf und gekreuzten Knochen – das Zeichen der Piraten.${reset}"
+        say "${magenta}Du starrst verträumt: 'Eines Tages, Baby…' – Die Möwen sind unbeeindruckt.${reset}"
         press_enter
         ;;
       "Mit dem Schiffsbauer sprechen")
-        echo -e "${magenta}Der Schiffsbauer schiebt seine Brille zurecht und nickt dir zu.${reset}"
         if $has_ship; then
-          echo -e "${magenta}'Du hast bereits dein Schiff', erinnert er dich.${reset}"
+          say "${yellow}Schiffsbauer:${reset} 'Pflege dein Schiff gut. Keine Bananenschalen an Deck!'"
+          press_enter
         else
-          echo -e "${magenta}'Möchtest du ein Schiff kaufen? Ein kleines Schiff kostet 50 Goldstücke', sagt er.${reset}"
-          if [ $gold -lt 50 ]; then
-            echo -e "${red}Du hast nicht genug Gold, um ein Schiff zu kaufen.${reset}"
+          say "${magenta}Schiffsbauer:${reset} 'Kleines Schiff, 50 Gold. Aber nur an Leute mit Karte und Crew!'"
+          if (( gold<50 )); then
+            say "${red}Du brauchst 50 Gold.${reset}"
+          elif ! $has_map; then
+            say "${red}Ohne Karte keine Auslieferung – Versicherungsding.${reset}"
+          elif ((${#crew[@]}<2)); then
+            say "${red}Mindestens zwei Crew-Mitglieder nötig.${reset}"
           else
-            if ! $has_map; then
-              echo -e "${red}'Ich verkaufe keine Schiffe an Leute ohne Karte. Du wirst dich sonst verirren!', warnt der Schiffsbauer.${reset}"
-            else
-              if [[ -z ${inventory["Schiffsjunge"]+x} ]]; then
-                echo -e "${red}'Du hast keine Crew. Auch ein kleines Schiff benötigt mindestens einen Matrosen!', sagt der Schiffsbauer.${reset}"
-              else
-                choose "Möchtest du das Schiff für 50 Gold kaufen?" "Ja" "Nein"
-                if [[ "$choice" = "Ja" ]]; then
-                  ((gold=gold-50))
-                  has_ship=true
-                  echo -e "${green}Du übergibst 50 Goldstücke. Der Schiffsbauer lächelt und überreicht dir die Schlüssel. Du besitzt nun ein eigenes Schiff!${reset}"
-                  echo -e "${yellow}Verbleibendes Gold: $gold${reset}"
-                else
-                  echo -e "${magenta}Du zögerst noch. Vielleicht später.${reset}"
-                fi
-              fi
+            choose "Schiff für 50 Gold kaufen?" "Ja" "Nein"
+            if [[ "$choice" == "Ja" ]]; then
+              gold=$((gold-50)); has_ship=true
+              say "${green}Du erhältst einen Schlüsselbund und ein Boot, das 'nicht ganz dicht' nur sprichwörtlich ist.${reset}"
             fi
           fi
+          press_enter
         fi
-        press_enter
+        ;;
+      "Kleiner Job: Fässer schleppen (+6 Gold)")
+        say "${cyan}Uff! Aua! …und +6 Gold. Dein Rücken verhandelt über Urlaub.${reset}"
+        gold=$((gold+6)); money; press_enter
+        ;;
+      "Zum Leuchtturm (Navigator?)")
+        lighthouse_scene
         ;;
       "Zurück zur Straße")
-        leave=true
+        return
         ;;
     esac
   done
 }
 
-# Function: sail_away
-# Triggered when the player has a ship, a map and a crew. Shows the final
-# sailing scene with ASCII art and ends the game with a 'to be continued'.
-sail_away() {
+lighthouse_scene(){
   clear
-  echo -e "${yellow}Du hast alles, was du brauchst: eine Karte, Gold für Vorräte, eine kleine Crew und dein eigenes Schiff.${reset}"
-  echo -e "${blue}Mit pochendem Herzen läufst du an Bord. Der Wind füllt die Segel, und das Schiff schneidet durchs Wasser.${reset}"
-  ascii_ship | while read -r line; do echo -e "${cyan}${line}${reset}"; done
-  echo
-  echo -e "${bold}${magenta}Du stichst in See und beginnst dein erstes großes Abenteuer!${reset}"
+  paint "$white" "$(ascii_lighthouse)"
+  say "${cyan}Der Leuchtturmwärter blinzelt: 'Navigator suchst du? Beweise dein Hirn kann mehr als Rum verdunsten.'${reset}"
+  if in_crew "Navigator"; then
+    say "${yellow}Der Navigator zeichnet schon Sterne in dein Logbuch.${reset}"; press_enter; return
+  fi
+  say "${magenta}Rätsel:${reset} 'Ich zeige immer nach Norden, obwohl ich nie gehe. Was bin ich?'"
+  choose "Antwort wählen:" "Ein Kompass" "Die Ebbe" "Ein Pirat nach Feierabend"
+  if [[ "$choice" == "Ein Kompass" ]]; then
+    crew["Navigator"]=true
+    say "${green}'Richtig. Ich komme mit. Aber ich parke den Leuchtturm ordentlich!' (Navigator tritt bei)${reset}"
+  else
+    say "${red}'Nope.' Der Wärter macht das universelle 'falsche Antwort'-Gesicht.${reset}"
+  fi
+  press_enter
+}
+
+# --- Schmiede: Kanonier (Mathe), Tischler (Knoten), Job -----------------------
+blacksmith_scene(){
+  clear
+  paint "$red" "$(ascii_blacksmith)"
+  say "${cyan}Es zischt und funkelt. Die Schmiedin nickt knapp.${reset}"
+  while true; do
+    local acts=("Mit Kanonier sprechen" "Mit Tischler sprechen" "Kleiner Job: Kohle schaufeln (+8 Gold)" "Zurück zur Straße")
+    choose "Was tun?" "${acts[@]}"
+    case "$choice" in
+      "Mit Kanonier sprechen")
+        if in_crew "Kanonier"; then
+          say "${yellow}Der Kanonier poliert imaginäre Kanonen. 'Peng!' – 'Noch nicht!'${reset}"
+        else
+          say "${magenta}Kanonier:${reset} 'Rechnen kannst du? Test: Zwei Kanonen schießen alle 10 Sekunden je eine Kugel. Wie viele Kugeln nach 1 Minute?'"
+          choose "Deine Antwort:" "12" "6" "10"
+          if [[ "$choice" == "12" ]]; then
+            crew["Kanonier"]=true; say "${green}'Passt. Ich bin dabei.' (Kanonier tritt bei)${reset}"
+          else
+            say "${red}'Du bist doch nicht die Buchhaltung, oder?'${reset}"
+          fi
+        fi
+        press_enter
+        ;;
+      "Mit Tischler sprechen")
+        if in_crew "Tischler"; then
+          say "${yellow}Der Tischler klopft auf Holz. 'Klingt solide.'${reset}"
+        else
+          say "${magenta}Tischler:${reset} 'Welcher Knoten für eine Rettungsschlinge?'"
+          choose "Antwort:" "Palstek" "Schotstek" "Fischerknoten"
+          if [[ "$choice" == "Palstek" ]]; then
+            crew["Tischler"]=true; say "${green}'Aye. Du bist mein Kapitän.' (Tischler tritt bei)${reset}"
+          else
+            say "${red}'Das hält höchstens deine Hose.'${reset}"
+          fi
+        fi
+        press_enter
+        ;;
+      "Kleiner Job: Kohle schaufeln (+8 Gold)")
+        say "${cyan}Schwitz! Staub! Aber +8 Gold. Deine Lunge singt 'Hust-Hust' im Kanon.${reset}"
+        gold=$((gold+8)); money; press_enter
+        ;;
+      "Zurück zur Straße")
+        return
+        ;;
+    esac
+  done
+}
+
+# --- Segeln (Ziel) ------------------------------------------------------------
+sail_away(){
+  clear
+  paint "$cyan" "$(ascii_ship_big)"
+  say "${yellow}Du hast: Schiff, Karte und mindestens drei fähige Gestalten, die 'Backbord' nicht für ein Brettspiel halten.${reset}"
+  say "${blue}Der Wind füllt die Segel. Du stichst in See. Irgendwo gackert eine Möwe auf Piratisch.${reset}"
   echo -e "${bold}${magenta}TO BE CONTINUED ...${reset}"
   press_enter
   exit 0
 }
 
-# Function: main_loop
-# Coordinates the player's movement between locations until they achieve their
-# goal. If the player obtains the ship along with necessary items, the game
-# calls sail_away().
-main_loop() {
+# --- Hauptschleife / Stadt ----------------------------------------------------
+street_scene(){
   while true; do
-    # Check winning condition
-    if $has_ship && $has_map && [[ -n ${inventory["Schiffsjunge"]+x} ]]; then
-      sail_away
-    fi
+    # Siegbedingung: Schiff, Karte, >=3 Crew
+    if $has_ship && $has_map && ((${#crew[@]}>=3)); then sail_away; fi
+
     clear
-    echo -e "${yellow}Du stehst auf der staubigen Straße der Hafenstadt. Rechts steht die Taverne, links der Markt und geradeaus siehst du den Hafen.${reset}"
-    echo -e "${cyan}Wohin möchtest du gehen?${reset}"
-    local options=("Zur Taverne" "Zum Markt" "Zum Hafen" "Status anzeigen" "Spiel beenden")
-    choose "" "${options[@]}"
+    paint "$cyan" "$(ascii_street)"
+    say "${yellow}Du stehst auf der staubigen Straße der Hafenstadt."
+    local ops=("Zur Taverne" "Zum Markt" "Zum Hafen" "Zur Schmiede" "Status anzeigen" "Spiel speichern" "Spiel beenden")
+    choose "Wohin?" "${ops[@]}"
     case "$choice" in
-      "Zur Taverne")
-        tavern_scene
-        ;;
-      "Zum Markt")
-        market_scene
-        ;;
-      "Zum Hafen")
-        harbour_scene
-        ;;
-      "Status anzeigen")
-        echo -e "${yellow}Gold: $gold${reset}"
-        echo -e "${yellow}Inventar:${reset}"
-        local any=false
-        for key in "${!inventory[@]}"; do
-          if [[ ${inventory[$key]} == true ]]; then
-            echo -e "  - $key"
-            any=true
-          fi
-        done
-        if ! $any; then
-          echo -e "  (leer)"
-        fi
-        press_enter
-        ;;
-      "Spiel beenden")
-        echo -e "${magenta}Bis zum nächsten Mal!${reset}"
-        exit 0
-        ;;
+      "Zur Taverne") tavern_scene ;;
+      "Zum Markt") market_scene ;;
+      "Zum Hafen") harbour_scene ;;
+      "Zur Schmiede") blacksmith_scene ;;
+      "Status anzeigen") status_screen ;;
+      "Spiel speichern") save_game; press_enter ;;
+      "Spiel beenden") say "${magenta}Bis zum nächsten Mal!${reset}"; exit 0 ;;
     esac
   done
 }
 
-# Start the game
+# --- Start --------------------------------------------------------------------
+check_terminal
 display_header
 press_enter
-main_loop
+street_scene
